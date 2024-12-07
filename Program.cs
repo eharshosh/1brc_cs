@@ -145,17 +145,17 @@ internal static class Program
             var fraction = FastParseNoSign(measurement[(dotIndex + 1)..]);
             var signFactor = measurement[0] == '-' ? -1 : 1;
             var value = whole + fraction * signFactor;
-            if (!alternateLookup.TryGetValue(city, out var state))
+            if (alternateLookup.TryGetValue(city, out var state))
             {
-                state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
-                alternateLookup[city] = state;
+                state.Min = state.Min < value ? state.Min : value;
+                state.Max = state.Max > value ? state.Max : value;
+                state.Sum += value;
+                state.Count++;
             }
             else
             {
-                state.Min = Math.Min(state.Min, value);
-                state.Max = Math.Max(state.Max, value);
-                state.Sum += value;
-                state.Count++;
+                state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
+                alternateLookup[city] = state;
             }
         }
 
