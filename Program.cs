@@ -1,6 +1,5 @@
 ﻿using System.Buffers;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -141,10 +140,8 @@ internal static class Program
             var city = cityChars[..cityLength];
             var measurement = lineSpan[(semiColonIndex + 1)..];
             var dotIndex = measurement.IndexOf(DotChar);
-            var whole = FastParse(measurement[..dotIndex]) * 10;
-            var fraction = FastParseNoSign(measurement[(dotIndex + 1)..]);
-            var signFactor = measurement[0] == '-' ? -1 : 1;
-            var value = whole + fraction * signFactor;
+            measurement = measurement[..(dotIndex + 2)];
+            var value = ParseMeasurement(measurement);
             if (alternateLookup.TryGetValue(city, out var state))
             {
                 state.Min = state.Min < value ? state.Min : value;
@@ -162,25 +159,21 @@ internal static class Program
         return res;
     }
 
-    static int FastParse(ReadOnlySpan<byte> s)
+    static int ParseMeasurement(ReadOnlySpan<byte> measurement)
     {
-        if (s[0] == '-')
+        var res = measurement[^1] - '0' + (measurement[^3] - '0') * 10;
+        if (measurement.Length == 3)
         {
-            return -FastParseNoSign(s[1..]);
+            return res;
         }
 
-        return FastParseNoSign(s);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    static int FastParseNoSign(ReadOnlySpan<byte> s)
-    {
-        int y = 0;
-        foreach (var t in s)
+        if (measurement[^4] == '-')
         {
-            y = y * 10 + (t - '0');
+            return -res;
         }
 
-        return y;
+        res += (measurement[^4] - '0') * 100;
+        return measurement.Length == 4 ? res : -res;
     }
+
 }
