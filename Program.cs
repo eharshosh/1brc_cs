@@ -1,5 +1,6 @@
 ﻿using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -22,10 +23,11 @@ internal static class Program
         var sw = Stopwatch.StartNew();
         var map = new Dictionary<string, CityState>();
         await using var fs = File.OpenRead(dataFilename);
-        var readBuffer = new byte[2 * 1024 * 1024];
+        var readBuffer = new byte[10 * 1024 * 1024];
         int readLength;
         var tasks = new List<Task<Dictionary<string, CityState>>>();
         var semaphore = new SemaphoreSlim(Environment.ProcessorCount);
+
         while ((readLength = fs.Read(readBuffer)) > 1)
         {
             await semaphore.WaitAsync();
@@ -44,21 +46,17 @@ internal static class Program
 
         await MergeResults(tasks, map);
 
-        var outputName = Path.GetFileNameWithoutExtension(dataFilename) + "_ours.out";
-        var outFile = File.OpenWrite(outputName);
-        var writer = new StreamWriter(outFile);
         var output = new List<OutputLine>(map.Keys.Count);
         foreach (var (key, state) in map.OrderBy(kvp => kvp.Key))
         {
-            var avg = Math.Round((double)state.Sum / state.Count / 100) / 10;
-            var min = Math.Round((double)state.Min / 100) / 10;
-            var max = Math.Round((double)state.Max / 100) / 10;
-            writer.WriteLine(key + ";" + min + ";" + avg + ";" + max);
-            output.Add(new(key, (float)min, (float)avg, (float)max));
+            var avg = (float)Math.Round((double)state.Sum / state.Count) / 10;
+            var min = (float)state.Min / 10;
+            var max = (float)state.Max / 10;
+            output.Add(new(key, min, avg, max));
         }
 
         Console.WriteLine(sw.Elapsed);
-        
+
         ValidateOutput(output, compareToFilename);
     }
 
@@ -143,10 +141,10 @@ internal static class Program
             var city = cityChars[..cityLength];
             var measurement = lineSpan[(semiColonIndex + 1)..];
             var dotIndex = measurement.IndexOf(DotChar);
-            long factor = (int)Math.Pow(10, measurement.Length - dotIndex);
+            var whole = FastParse(measurement[..dotIndex]) * 10;
+            var fraction = FastParseNoSign(measurement[(dotIndex + 1)..]);
             var signFactor = measurement[0] == '-' ? -1 : 1;
-            var value = long.Parse(measurement[..dotIndex]) * 1000
-                        + long.Parse(measurement[(dotIndex + 1)..]) * factor * signFactor;
+            var value = whole + fraction * signFactor;
             if (!alternateLookup.TryGetValue(city, out var state))
             {
                 state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
@@ -162,5 +160,27 @@ internal static class Program
         }
 
         return res;
+    }
+
+    static int FastParse(ReadOnlySpan<byte> s)
+    {
+        if (s[0] == '-')
+        {
+            return -FastParseNoSign(s[1..]);
+        }
+
+        return FastParseNoSign(s);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int FastParseNoSign(ReadOnlySpan<byte> s)
+    {
+        int y = 0;
+        foreach (var t in s)
+        {
+            y = y * 10 + (t - '0');
+        }
+
+        return y;
     }
 }
