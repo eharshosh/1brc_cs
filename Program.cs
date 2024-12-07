@@ -10,45 +10,61 @@ internal static class Program
     {
         const string dataFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.txt";
         const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.out";
-
-// const string dataFilename = "/Users/eitan/development/1brc.data/measurements-10000000.txt";
-// const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-10000000.out";
+        //
+        // const string dataFilename = "/Users/eitan/development/1brc.data/measurements-10000000.txt";
+        // const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-10000000.out";
 
         var sw = Stopwatch.StartNew();
         var map = new Dictionary<string, CityState>();
         var alternateLookup = map.GetAlternateLookup<ReadOnlySpan<char>>();
         var lineCount = 0;
-
         using var fs = File.OpenRead(dataFilename);
-        using var reader = new StreamReader(fs, Encoding.UTF8);
-
-        while (reader.ReadLine() is { } line)
+        Span<byte> buffer = new byte[5 * 1024 * 1024];
+        using var reader = new BufferedStream(fs, 1024 * 1024 * 10);
+        Span<char> cityChars = stackalloc char[100];
+        int readLength;
+        const byte newLineChar = (byte)'\n';
+        const byte semiColChar = (byte)';';
+        const byte dotChar = (byte)'.';
+        while ((readLength = reader.Read(buffer)) > 1)
         {
-            if (++lineCount % 100_000_000 == 0)
-            {
-                Console.WriteLine($"{lineCount}@{sw.Elapsed}");
-            }
+            var lastLineIndex = readLength - buffer[..readLength].LastIndexOf(newLineChar);
+            reader.Position -= lastLineIndex - 1;
 
-            var lineSpan = line.AsSpan();
-            var semiColonIndex = lineSpan.IndexOf(';');
-            var city = lineSpan[..semiColonIndex];
-            var measurement = lineSpan[(semiColonIndex + 1)..];
-            var dotIndex = measurement.IndexOf('.');
-            long factor = (int)Math.Pow(10, measurement.Length - dotIndex);
-            var signFactor = measurement[0] == '-' ? -1 : 1;
-            var value = (int)(int.Parse(measurement[..dotIndex]) * 1000
-                                + int.Parse(measurement[(dotIndex + 1)..]) * factor * signFactor);
-            if (!alternateLookup.TryGetValue(city, out var state))
+            var readSpan = buffer[..readLength];
+            int newLineIndex;
+            int lineIndex = 0;
+            while ((newLineIndex = readSpan[lineIndex..].IndexOf(newLineChar)) != -1)
             {
-                state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
-                alternateLookup[city] = state;
-                continue;
-            }
+                var lineSpan = readSpan[lineIndex..(lineIndex + newLineIndex)];
+                lineIndex += newLineIndex + 1;
+                var semiColonIndex = lineSpan.IndexOf(semiColChar);
+                var cityRaw = lineSpan[..semiColonIndex];
+                var cityLength = Encoding.UTF8.GetChars(cityRaw, cityChars);
+                var measurement = lineSpan[(semiColonIndex + 1)..];
+                var dotIndex = measurement.IndexOf(dotChar);
+                var factor = (long)Math.Pow(10, measurement.Length - dotIndex);
+                var signFactor = measurement[0] == '-' ? -1 : 1;
+                var value = long.Parse(measurement[..dotIndex]) * 1000
+                            + long.Parse(measurement[(dotIndex + 1)..]) * factor * signFactor;
+                if (!alternateLookup.TryGetValue(cityChars[..cityLength], out var state))
+                {
+                    state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
+                    alternateLookup[cityChars[..cityLength]] = state;
+                }
+                else
+                {
+                    state.Min = Math.Min(state.Min, value);
+                    state.Max = Math.Max(state.Max, value);
+                    state.Sum += value;
+                    state.Count++;
+                }
 
-            state.Min = Math.Min(state.Min, value);
-            state.Max = Math.Max(state.Max, value);
-            state.Sum += value;
-            state.Count++;
+                if (++lineCount % 100_000_000 == 0)
+                {
+                    Console.WriteLine($"{lineCount}@{sw.Elapsed}");
+                }
+            }
         }
 
         var outputName = Path.GetFileNameWithoutExtension(dataFilename) + "_ours.out";
@@ -98,9 +114,9 @@ internal static class Program
 
     class CityState
     {
-        public int Min;
+        public long Min;
         public long Sum;
-        public int Max;
+        public long Max;
         public int Count;
     }
 
