@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Buffers;
+using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -6,7 +7,11 @@ namespace _1brc;
 
 internal static class Program
 {
-    public static void Main(string[] args)
+    private const byte NewLineChar = (byte)'\n';
+    private const byte SemiColChar = (byte)';';
+    private const byte DotChar = (byte)'.';
+
+    public static async Task Main(string[] args)
     {
         const string dataFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.txt";
         const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.out";
@@ -16,56 +21,28 @@ internal static class Program
 
         var sw = Stopwatch.StartNew();
         var map = new Dictionary<string, CityState>();
-        var alternateLookup = map.GetAlternateLookup<ReadOnlySpan<char>>();
-        var lineCount = 0;
-        using var fs = File.OpenRead(dataFilename);
-        Span<byte> buffer = new byte[5 * 1024 * 1024];
-        using var reader = new BufferedStream(fs, 1024 * 1024 * 10);
-        Span<char> cityChars = stackalloc char[100];
+        await using var fs = File.OpenRead(dataFilename);
+        var readBuffer = new byte[2 * 1024 * 1024];
         int readLength;
-        const byte newLineChar = (byte)'\n';
-        const byte semiColChar = (byte)';';
-        const byte dotChar = (byte)'.';
-        while ((readLength = reader.Read(buffer)) > 1)
+        var tasks = new List<Task<Dictionary<string, CityState>>>();
+        var semaphore = new SemaphoreSlim(Environment.ProcessorCount);
+        while ((readLength = fs.Read(readBuffer)) > 1)
         {
-            var lastLineIndex = readLength - buffer[..readLength].LastIndexOf(newLineChar);
-            reader.Position -= lastLineIndex - 1;
-
-            var readSpan = buffer[..readLength];
-            int newLineIndex;
-            int lineIndex = 0;
-            while ((newLineIndex = readSpan[lineIndex..].IndexOf(newLineChar)) != -1)
+            await semaphore.WaitAsync();
+            var lastLineIndex = readBuffer.AsSpan(0, readLength).LastIndexOf(NewLineChar);
+            fs.Position -= readLength - lastLineIndex - 1;
+            var taskBufferArray = ArrayPool<byte>.Shared.Rent(lastLineIndex);
+            readBuffer.AsSpan(0, lastLineIndex).CopyTo(taskBufferArray);
+            tasks.Add(Task.Run(() =>
             {
-                var lineSpan = readSpan[lineIndex..(lineIndex + newLineIndex)];
-                lineIndex += newLineIndex + 1;
-                var semiColonIndex = lineSpan.IndexOf(semiColChar);
-                var cityRaw = lineSpan[..semiColonIndex];
-                var cityLength = Encoding.UTF8.GetChars(cityRaw, cityChars);
-                var measurement = lineSpan[(semiColonIndex + 1)..];
-                var dotIndex = measurement.IndexOf(dotChar);
-                var factor = (long)Math.Pow(10, measurement.Length - dotIndex);
-                var signFactor = measurement[0] == '-' ? -1 : 1;
-                var value = long.Parse(measurement[..dotIndex]) * 1000
-                            + long.Parse(measurement[(dotIndex + 1)..]) * factor * signFactor;
-                if (!alternateLookup.TryGetValue(cityChars[..cityLength], out var state))
-                {
-                    state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
-                    alternateLookup[cityChars[..cityLength]] = state;
-                }
-                else
-                {
-                    state.Min = Math.Min(state.Min, value);
-                    state.Max = Math.Max(state.Max, value);
-                    state.Sum += value;
-                    state.Count++;
-                }
-
-                if (++lineCount % 100_000_000 == 0)
-                {
-                    Console.WriteLine($"{lineCount}@{sw.Elapsed}");
-                }
-            }
+                var res = ProcessBuffer(taskBufferArray.AsSpan(0, lastLineIndex));
+                ArrayPool<byte>.Shared.Return(taskBufferArray);
+                semaphore.Release();
+                return res;
+            }));
         }
+
+        await MergeResults(tasks, map);
 
         var outputName = Path.GetFileNameWithoutExtension(dataFilename) + "_ours.out";
         var outFile = File.OpenWrite(outputName);
@@ -81,26 +58,53 @@ internal static class Program
         }
 
         Console.WriteLine(sw.Elapsed);
+        
+        ValidateOutput(output, compareToFilename);
+    }
 
-
-        var outputSorted = output.ToDictionary(x => x.City);
-        var compareTo = ReadCompareTo(compareToFilename);
-        foreach (var (city, item) in compareTo)
+    private static void ValidateOutput(List<OutputLine> output, string compareToFilename)
+    {
+        var outputMap = output.ToDictionary(x => x.City);
+        var compareFileLines = ReadCompareFile(compareToFilename);
+        foreach (var item in compareFileLines)
         {
-            if (!outputSorted.TryGetValue(city, out var outputItem))
+            if (!outputMap.TryGetValue(item.City, out var outputItem))
             {
-                Console.WriteLine(city + " not found");
+                Console.WriteLine(item.City + " not found");
                 continue;
             }
 
             if (item != outputItem)
             {
-                Console.WriteLine($"{city}: {item} != {outputItem}");
+                Console.WriteLine($"{item} != {outputItem}");
             }
         }
     }
 
-    static Dictionary<string, OutputLine> ReadCompareTo(string filename)
+    private static async Task MergeResults(List<Task<Dictionary<string, CityState>>> tasks,
+        Dictionary<string, CityState> map)
+    {
+        var res = await Task.WhenAll(tasks);
+        foreach (var dictionary in res)
+        {
+            foreach (var (key, value) in dictionary)
+            {
+                if (!map.TryGetValue(key, out var state))
+                {
+                    map[key] = value;
+                }
+                else
+                {
+                    state.Min = Math.Min(state.Min, value.Min);
+                    state.Max = Math.Max(state.Max, value.Max);
+                    state.Sum += value.Sum;
+                    state.Count += value.Count;
+                }
+            }
+        }
+    }
+
+    static OutputLine[] ReadCompareFile(string filename)
     {
         var rawInput = File.ReadAllText(filename)[1..^2];
         return Regex
@@ -109,7 +113,7 @@ internal static class Program
             .Chunk(6)
             .Select(chunk =>
                 new OutputLine(chunk[1], float.Parse(chunk[2]), float.Parse(chunk[3]), float.Parse(chunk[4])))
-            .ToDictionary(x => x.City);
+            .ToArray();
     }
 
     class CityState
@@ -121,4 +125,42 @@ internal static class Program
     }
 
     record OutputLine(string City, float Min, float Average, float Max);
+
+    static Dictionary<string, CityState> ProcessBuffer(Span<byte> readSpan)
+    {
+        var res = new Dictionary<string, CityState>();
+        var alternateLookup = res.GetAlternateLookup<ReadOnlySpan<char>>();
+        Span<char> cityChars = stackalloc char[100];
+        int newLineIndex;
+        var lineIndex = 0;
+        while ((newLineIndex = readSpan[lineIndex..].IndexOf(NewLineChar)) != -1)
+        {
+            var lineSpan = readSpan[lineIndex..(lineIndex + newLineIndex)];
+            lineIndex += newLineIndex + 1;
+            var semiColonIndex = lineSpan.IndexOf(SemiColChar);
+            var cityRaw = lineSpan[..semiColonIndex];
+            var cityLength = Encoding.UTF8.GetChars(cityRaw, cityChars);
+            var city = cityChars[..cityLength];
+            var measurement = lineSpan[(semiColonIndex + 1)..];
+            var dotIndex = measurement.IndexOf(DotChar);
+            long factor = (int)Math.Pow(10, measurement.Length - dotIndex);
+            var signFactor = measurement[0] == '-' ? -1 : 1;
+            var value = long.Parse(measurement[..dotIndex]) * 1000
+                        + long.Parse(measurement[(dotIndex + 1)..]) * factor * signFactor;
+            if (!alternateLookup.TryGetValue(city, out var state))
+            {
+                state = new CityState { Min = value, Max = value, Sum = value, Count = 1 };
+                alternateLookup[city] = state;
+            }
+            else
+            {
+                state.Min = Math.Min(state.Min, value);
+                state.Max = Math.Max(state.Max, value);
+                state.Sum += value;
+                state.Count++;
+            }
+        }
+
+        return res;
+    }
 }
