@@ -22,12 +22,15 @@ internal static class Program
         var sw = Stopwatch.StartNew();
         var map = new Dictionary<string, CityState>();
         await using var fs = File.OpenRead(dataFilename);
-        var readBuffer = new byte[10 * 1024 * 1024];
+        var readBuffer = new byte[5 * 1024 * 1024];
         int readLength;
-        var tasks = new List<Task<Dictionary<string, CityState>>>();
+        var tasks = new List<Task>();
         var semaphore = new SemaphoreSlim(Environment.ProcessorCount);
-
-        while ((readLength = fs.Read(readBuffer)) > 1)
+        var maps =
+            Enumerable.Range(0, Environment.ProcessorCount)
+                .Select(_ => new Dictionary<string, CityState>(40_000))
+                .ToList();
+        while ((readLength = await fs.ReadAsync(readBuffer)) > 1)
         {
             await semaphore.WaitAsync();
             var lastLineIndex = readBuffer.AsSpan(0, readLength).LastIndexOf(NewLineChar);
@@ -36,14 +39,27 @@ internal static class Program
             readBuffer.AsSpan(0, lastLineIndex).CopyTo(taskBufferArray);
             tasks.Add(Task.Run(() =>
             {
-                var res = ProcessBuffer(taskBufferArray.AsSpan(0, lastLineIndex));
+                Dictionary<string, CityState> borrowedMap;
+                lock (maps)
+                {
+                    borrowedMap = maps[0];
+                    maps.RemoveAt(0);
+                }
+
+                ProcessBuffer(taskBufferArray.AsSpan(0, lastLineIndex), borrowedMap);
                 ArrayPool<byte>.Shared.Return(taskBufferArray);
+                lock (maps)
+                {
+                    maps.Add(borrowedMap);
+                }
+
                 semaphore.Release();
-                return res;
             }));
         }
 
-        await MergeResults(tasks, map);
+        await Task.WhenAll(tasks);
+        MergeResults(maps, map);
+
 
         var output = new List<OutputLine>(map.Keys.Count);
         foreach (var (key, state) in map.OrderBy(kvp => kvp.Key))
@@ -55,6 +71,7 @@ internal static class Program
         }
 
         Console.WriteLine(sw.Elapsed);
+        Console.WriteLine((long)(1000000000 / sw.Elapsed.TotalSeconds) + " lines per second");
 
         ValidateOutput(output, compareToFilename);
     }
@@ -78,10 +95,9 @@ internal static class Program
         }
     }
 
-    private static async Task MergeResults(List<Task<Dictionary<string, CityState>>> tasks,
+    private static void MergeResults(List<Dictionary<string, CityState>> res,
         Dictionary<string, CityState> map)
     {
-        var res = await Task.WhenAll(tasks);
         foreach (var dictionary in res)
         {
             foreach (var (key, value) in dictionary)
@@ -123,10 +139,9 @@ internal static class Program
 
     record OutputLine(string City, float Min, float Average, float Max);
 
-    static Dictionary<string, CityState> ProcessBuffer(Span<byte> readSpan)
+    static void ProcessBuffer(Span<byte> readSpan, Dictionary<string, CityState> map)
     {
-        var res = new Dictionary<string, CityState>();
-        var alternateLookup = res.GetAlternateLookup<ReadOnlySpan<char>>();
+        var alternateLookup = map.GetAlternateLookup<ReadOnlySpan<char>>();
         Span<char> cityChars = stackalloc char[100];
         int newLineIndex;
         var lineIndex = 0;
@@ -155,8 +170,6 @@ internal static class Program
                 alternateLookup[city] = state;
             }
         }
-
-        return res;
     }
 
     static int ParseMeasurement(ReadOnlySpan<byte> measurement)
@@ -175,5 +188,4 @@ internal static class Program
         res += (measurement[^4] - '0') * 100;
         return measurement.Length == 4 ? res : -res;
     }
-
 }
