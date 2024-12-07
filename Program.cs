@@ -13,15 +13,15 @@ internal static class Program
 
     public static async Task Main(string[] args)
     {
-        const string dataFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.txt";
-        const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.out";
+        //const string dataFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.txt";
+        //const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-1000000000.out";
         //
         // const string dataFilename = "/Users/eitan/development/1brc.data/measurements-10000000.txt";
         // const string compareToFilename = "/Users/eitan/development/1brc.data/measurements-10000000.out";
 
         var sw = Stopwatch.StartNew();
         var map = new Dictionary<string, CityState>();
-        await using var fs = File.OpenRead(dataFilename);
+        await using var fs = File.OpenRead(args[0]);
         var readBuffer = new byte[5 * 1024 * 1024];
         int readLength;
         var tasks = new List<Task>();
@@ -73,7 +73,7 @@ internal static class Program
         Console.WriteLine(sw.Elapsed);
         Console.WriteLine((long)(1000000000 / sw.Elapsed.TotalSeconds) + " lines per second");
 
-        ValidateOutput(output, compareToFilename);
+        ValidateOutput(output, args[1]);
     }
 
     private static void ValidateOutput(List<OutputLine> output, string compareToFilename)
